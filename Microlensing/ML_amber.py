@@ -1024,3 +1024,145 @@ class ThreeLens1S:
         return ani
     
         
+class ThreeLensViz:
+    """
+    Minimal visualizer for triple-lens:
+      • plot_caustics_and_track()
+      • plot_centroid_trajectory()
+
+    All lengths are in units of the close-pair Einstein radius θ_E,B (Han 2002).
+    """
+
+    def __init__(self,
+                 t0, tE, rho,
+                 u0,                 # single u0 (float)
+                 q2, q3,             # mass ratios m2/m1, m3/m1
+                 s2, s3,             # separations from lens1 (x1=0,y1=0)
+                 alpha_deg, psi_deg, # source-track angle; third-body polar angle from lens1
+                 rs, secnum, basenum,
+                 tau_min=-20.0, tau_max=+20.0, num_points=3000):
+        self.t0, self.tE, self.rho = t0, tE, rho
+        self.u0 = float(u0)
+        self.q2, self.q3 = float(q2), float(q3)
+        self.s2, self.s3 = float(s2), float(s3)
+        self.alpha_deg, self.psi_deg = float(alpha_deg), float(psi_deg)
+        self.alpha_rad, self.psi_rad = np.deg2rad(self.alpha_deg), np.deg2rad(self.psi_deg)
+        self.rs, self.secnum, self.basenum = rs, int(secnum), int(basenum)
+
+        # Long, user-controlled window (this is what "stretches" your trajectory)
+        self.tau_min, self.tau_max = float(tau_min), float(tau_max)
+        self.num_points = int(num_points)
+        self.tau = np.linspace(self.tau_min, self.tau_max, self.num_points)
+        self.t   = self.t0 + self.tau * self.tE
+
+        # VBM just to get caustics/criticals reliably
+        self.VBM = VBMicrolensing.VBMicrolensing()
+        self.VBM.RelTol = 1e-5
+        self.VBM.Tol    = 1e-6
+        self.VBM.astrometry = True
+        self.VBM.SetMethod(self.VBM.Method.Nopoly)
+
+    # -------- geometry helpers --------
+    def get_lens_geometry(self):
+        # masses normalized so m1 + m2 + m3 = 1
+        m1 = 1.0 / (1.0 + self.q2 + self.q3)
+        m2 = self.q2 * m1
+        m3 = self.q3 * m1
+        mlens = [m1, m2, m3]
+        x1, y1 = 0.0, 0.0
+        x2, y2 = self.s2, 0.0
+        x3, y3 = self.s3*np.cos(self.psi_rad), self.s3*np.sin(self.psi_rad)
+        zlens = [x1, y1, x2, y2, x3, y3]
+        return mlens, zlens
+
+    def source_path(self):
+        # VB-style parametric path in units of θ_E,B
+        # (τ along direction α, impact u0 perpendicular)
+        u0, a = self.u0, self.alpha_rad
+        y1s =  u0*np.sin(a) + self.tau*np.cos(a)
+        y2s =  u0*np.cos(a) - self.tau*np.sin(a)
+        return y1s, y2s
+
+    # -------- public API --------
+    def plot_caustics_and_track(self, xlim=None, ylim=None, show=True):
+        """Draw caustics, critical curves, lens points, and the **full** source track (long τ)."""
+        mlens, zlens = self.get_lens_geometry()
+
+        # Initialize VBM state once so Multicaustics/Multicriticalcurves are populated
+        param = [np.log(self.s2), np.log(self.q2), self.u0, self.alpha_rad,
+                 np.log(self.rho), np.log(self.tE), self.t0,
+                 np.log(self.s3), np.log(self.q3), self.psi_rad]
+        _ = self.VBM.TripleLightCurve(param, self.t)  # just to set geometry inside VBM
+        caustics = self.VBM.Multicaustics()
+        critical = self.VBM.Multicriticalcurves()
+
+        fig, ax = plt.subplots(figsize=(8, 8))
+
+        # Caustics / criticals
+        for c in caustics:
+            ax.plot(c[0], c[1], 'r', lw=1.2)
+        for cr in critical:
+            ax.plot(cr[0], cr[1], 'k--', lw=0.8)
+
+        # Lens positions
+        x1,y1,x2,y2,x3,y3 = zlens
+        ax.plot([x1,x2,x3], [y1,y2,y3], 'ko')
+
+        # Source track (long!)
+        y1s, y2s = self.source_path()
+        ax.plot(y1s, y2s, color='purple', lw=2, label=fr'$u_0={self.u0:g}$, $\alpha={self.alpha_deg:g}^\circ$')
+
+        ax.set_aspect('equal', 'box')
+        ax.grid(True, alpha=0.3)
+        ax.set_title("Caustics, Critical Curves, and Source Track")
+        ax.legend(loc='upper left')
+
+        if xlim: ax.set_xlim(*xlim)
+        if ylim: ax.set_ylim(*ylim)
+        if show: plt.show()
+        return fig, ax
+
+    def plot_centroid_trajectory(self, show=True, color='tab:blue', label=None):
+        """
+        Compute centroid shift δ = (Σ μ_i x_i / Σ μ_i) - (y1s, y2s) along the long τ grid,
+        using your existing image finder (getphis_v3 + get_allimgs_with_mu).
+        """
+        mlens, zlens = self.get_lens_geometry()
+        z = [[zlens[0], zlens[1]], [zlens[2], zlens[3]], [zlens[4], zlens[5]]]
+
+        # Caustic point cloud once for the solver speed-up
+        criticalcurves, caustic_pts = get_crit_caus(mlens, z, len(mlens))
+        caus_x = np.array([pt[0] for pt in caustic_pts])
+        caus_y = np.array([pt[1] for pt in caustic_pts])
+
+        y1s, y2s = self.source_path()
+        cent_x, cent_y = np.empty_like(y1s), np.empty_like(y2s)
+
+        for i in range(self.num_points):
+            Phis = getphis_v3(mlens, z, y1s[i], y2s[i], self.rs, 2000,
+                              caus_x, caus_y, secnum=self.secnum, basenum=self.basenum, scale=10)[0]
+            imgXS, imgYS, imgMUs, *_ = get_allimgs_with_mu(
+                mlens, z, y1s[i], y2s[i], self.rs, len(mlens), Phis)
+
+            if len(imgMUs) == 0 or np.sum(imgMUs) == 0:
+                cent_x[i] = np.nan
+                cent_y[i] = np.nan
+            else:
+                mu = np.array(imgMUs)
+                cent_x[i] = np.sum(mu*np.array(imgXS)) / np.sum(mu)
+                cent_y[i] = np.sum(mu*np.array(imgYS)) / np.sum(mu)
+
+        # Centroid shift relative to unlensed source
+        dx = cent_x - y1s
+        dy = cent_y - y2s
+
+        fig, ax = plt.subplots(figsize=(6, 6))
+        ax.plot(dx, dy, lw=2, color=color, label=label or "Triple (centroid shift)")
+        ax.set_xlabel(r'$\delta \theta_x / \theta_{E,B}$')
+        ax.set_ylabel(r'$\delta \theta_y / \theta_{E,B}$')
+        ax.set_aspect('equal', 'box')
+        ax.grid(True, alpha=0.3)
+        ax.set_title("Centroid Shift Trajectory (long τ)")
+        ax.legend()
+        if show: plt.show()
+        return fig, ax, (dx, dy), (y1s, y2s)
