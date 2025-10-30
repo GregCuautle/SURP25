@@ -820,9 +820,9 @@ from IPython.display import HTML
 
 import VBMicrolensing
 import TripleLensing
-from TestML import get_crit_caus, getphis_v3, get_allimgs_with_mu, testing
+from TestML_error import get_crit_caus, getphis_v3, get_allimgs_with_mu, testing
 
-class ThreeLens1S:
+class ThreeLens1S_error:
     def __init__(self, t0, tE, rho, u0_list, q2, q3, s2, s3, alpha_deg, psi_deg,
                  rs, secnum, basenum, num_points):
 
